@@ -11,7 +11,7 @@ Para reproduzir integralmente este projeto de forma independente:
 1. **Importação do Notebook:**
    * Acesse o seu workspace no Databricks.
    * Navegue até **Workspace** > **Users** > seu usuário.
-   * Clique com o botão direito, selecione **Import** e faça o upload do arquivo `Case iFood - Guilherme F.ipynb`.
+   * Clique com o botão direito, selecione **Import** e faça o upload do arquivo `case_prod.py`.
 
 2. **Ambiente de Computação Recomendado:**
    * **Databricks Serverless** ou cluster Single Node / Multi Node com **Databricks Runtime 13.3+ LTS** (Spark 3.4+).
