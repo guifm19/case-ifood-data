@@ -11,8 +11,8 @@ Original file is located at
 # -*- coding: utf-8 -*-
 
 """
-Case iFood - Análise e Modelagem Financeira (Ambiente de Produção)
-Script PySpark portável (compatível com spark-submit, Airflow, etc.)
+Case Técnico de Data Analysis - iFood
+Pipeline analítico e de engenharia de dados ponta a ponta (Padrão de Produção Portável).
 """
 
 import os
@@ -35,22 +35,27 @@ from pyspark.sql.window import Window
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("iFood_Pipeline")
 
+
 def main():
     start_time_pipeline = time.time()
 
-    # 1. Inicializar SparkSession
+    # 1. Inicialização da SparkSession
     logger.info("A inicializar a Spark Session...")
-    spark = SparkSession.builder \
-        .appName("iFood_Case_Production_Pipeline") \
+    spark = (
+        SparkSession.builder
+        .appName("iFood_Analytics_Production_Pipeline")
+        .config("spark.sql.adaptive.enabled", "true")
         .getOrCreate()
-
+    )
     spark.sparkContext.setLogLevel("WARN")
 
     # ==============================================================================
-    # EXTRAÇÃO E DOWNLOAD
+    # 2. EXTRAÇÃO E DOWNLOAD DOS DADOS BRUTOS
     # ==============================================================================
     BASE_WORK_DIR = "./ifood_raw_data"
+    PLOTS_DIR = "./ifood_plots"
     os.makedirs(BASE_WORK_DIR, exist_ok=True)
+    os.makedirs(PLOTS_DIR, exist_ok=True)
 
     DATASETS_CONFIG = {
         "orders": "https://data-architect-test-source.s3-sa-east-1.amazonaws.com/order.json.gz",
@@ -69,7 +74,7 @@ def main():
                     raise e
                 time.sleep(delay * attempt)
 
-    logger.info("A descarregar os conjuntos de dados (caso não existam)...")
+    logger.info("A verificar e descarregar fontes de dados...")
     for name, url in DATASETS_CONFIG.items():
         file_name = url.split("/")[-1]
         local_path = os.path.join(BASE_WORK_DIR, file_name)
@@ -86,16 +91,16 @@ def main():
                 raise e
 
     # ==============================================================================
-    # ETL - CAMADA BRONZE
+    # 3. CAMADA BRONZE (INGESTÃO COM METADADOS E OBSERVABILIDADE)
     # ==============================================================================
     logger.info("A processar a Camada Bronze...")
     run_id = str(uuid.uuid4())
     batch_start = F.current_timestamp()
 
-    df_raw_consumers = spark.read.option("header", "true").csv(os.path.join(BASE_WORK_DIR, 'consumer.csv.gz'))
-    df_raw_restaurants = spark.read.option("header", "true").csv(os.path.join(BASE_WORK_DIR, 'restaurant.csv.gz'))
-    df_raw_orders = spark.read.json(os.path.join(BASE_WORK_DIR, 'order.json.gz'))
-    df_raw_ab = spark.read.option("header", "true").csv(os.path.join(BASE_WORK_DIR, 'ab_test_ref.csv'))
+    df_raw_consumers = spark.read.option("header", "true").csv(os.path.join(BASE_WORK_DIR, "consumer.csv.gz"))
+    df_raw_restaurants = spark.read.option("header", "true").csv(os.path.join(BASE_WORK_DIR, "restaurant.csv.gz"))
+    df_raw_orders = spark.read.json(os.path.join(BASE_WORK_DIR, "order.json.gz"))
+    df_raw_ab = spark.read.option("header", "true").csv(os.path.join(BASE_WORK_DIR, "ab_test_ref.csv"))
 
     def append_to_bronze(df: DataFrame, table_name: str, source_file: str):
         (
@@ -104,8 +109,8 @@ def main():
             .withColumn("_ingested_at", batch_start)
             .withColumn("_source_file", F.lit(source_file))
             .write
-            .format("parquet") # Usado parquet como padrão portável em vez de delta
-            .mode("append")
+            .format("parquet")
+            .mode("overwrite")
             .save(os.path.join(BASE_WORK_DIR, f"bronze_{table_name}"))
         )
 
@@ -114,7 +119,6 @@ def main():
     append_to_bronze(df_raw_orders, "orders", "order.json.gz")
     append_to_bronze(df_raw_ab, "ab_test", "ab_test_ref.csv")
 
-    # Observabilidade de Ingestão
     dq_orders = df_raw_orders.select(
         F.count(F.lit(1)).alias("orders_total"),
         F.countDistinct("order_id").alias("orders_distinct"),
@@ -137,30 +141,41 @@ def main():
     ).first()
 
     obs_data = [(
-        run_id, dq_orders["orders_total"], dq_orders["orders_total"] - dq_orders["orders_distinct"],
-        dq_orders["orders_missing_id"], dq_orders["orders_missing_customer"], dq_orders["orders_missing_merchant"],
-        dq_orders["orders_negative_amount"], dq_consumers["consumers_total"], dq_consumers["consumers_total"] - dq_consumers["consumers_distinct"],
-        dq_consumers["consumers_missing_id"], dq_restaurants["restaurants_total"], dq_restaurants["restaurants_total"] - dq_restaurants["restaurants_distinct"],
+        run_id,
+        dq_orders["orders_total"],
+        dq_orders["orders_total"] - dq_orders["orders_distinct"],
+        dq_orders["orders_missing_id"],
+        dq_orders["orders_missing_customer"],
+        dq_orders["orders_missing_merchant"],
+        dq_orders["orders_negative_amount"],
+        dq_consumers["consumers_total"],
+        dq_consumers["consumers_total"] - dq_consumers["consumers_distinct"],
+        dq_consumers["consumers_missing_id"],
+        dq_restaurants["restaurants_total"],
+        dq_restaurants["restaurants_total"] - dq_restaurants["restaurants_distinct"],
         dq_restaurants["restaurants_missing_id"]
     )]
 
     obs_cols = [
-        "run_id", "pedidos_totais", "pedidos_duplicados", "pedidos_sem_order_id", "pedidos_sem_customer_id", "pedidos_sem_merchant_id", "pedidos_valor_negativo",
-        "clientes_totais", "clientes_duplicados", "clientes_sem_customer_id", "restaurantes_totais", "restaurantes_duplicados", "restaurantes_sem_merchant_id"
+        "run_id", "pedidos_totais", "pedidos_duplicados", "pedidos_sem_order_id",
+        "pedidos_sem_customer_id", "pedidos_sem_merchant_id", "pedidos_valor_negativo",
+        "clientes_totais", "clientes_duplicados", "clientes_sem_customer_id",
+        "restaurantes_totais", "restaurantes_duplicados", "restaurantes_sem_merchant_id"
     ]
 
     df_obs = spark.createDataFrame(obs_data, obs_cols).withColumn("created_at", F.current_timestamp())
-    print("\n--- MÉTRICAS DE QUALIDADE DE INGESTÃO (BRONZE) ---")
+    print("\n" + "=" * 70)
+    print("📋 OBSERVABILIDADE DE QUALIDADE DE DADOS (CAMADA BRONZE)")
+    print("=" * 70)
     df_obs.show(truncate=False)
 
     # ==============================================================================
-    # ETL - CAMADA SILVER
+    # 4. CAMADA SILVER (SANEAMENTO, CONFORMIDADE E DEDUPLICAÇÃO)
     # ==============================================================================
     logger.info("A processar a Camada Silver...")
     def save_to_silver(df: DataFrame, table_name: str) -> None:
         df.write.format("parquet").mode("overwrite").save(os.path.join(BASE_WORK_DIR, f"silver_{table_name}"))
 
-    # Lemos do Parquet guardado e filtramos pelo run_id (simulando batch)
     bronze_consumers = spark.read.parquet(os.path.join(BASE_WORK_DIR, "bronze_consumers"))
     df_silver_consumers = (
         bronze_consumers
@@ -219,14 +234,17 @@ def main():
         .withColumn("rn_desc", F.row_number().over(window_time_desc))
         .filter((F.col("total_ocorrencias") == 1) | ((F.col("total_ocorrencias") > 1) & (F.col("rn_desc") > 1)))
         .drop("total_ocorrencias", "rn_desc")
-        .select("order_id", "customer_id", "merchant_id", "order_created_at", "order_total_amount", "delivery_address_city", "origin_platform", "order_scheduled")
+        .select(
+            "order_id", "customer_id", "merchant_id", "order_created_at",
+            "order_total_amount", "delivery_address_city", "origin_platform", "order_scheduled"
+        )
     )
     save_to_silver(df_silver_orders, "orders")
 
     # ==============================================================================
-    # ETL - CAMADA GOLD (ODS)
+    # 5. CAMADA GOLD (MODELAÇÃO DIMENSIONAL E LTV)
     # ==============================================================================
-    logger.info("A processar a Camada Gold (ODS)...")
+    logger.info("A processar a Camada Gold (Dimensões e Factos)...")
     def save_to_gold(df: DataFrame, table_name: str) -> None:
         df.write.format("parquet").mode("overwrite").save(os.path.join(BASE_WORK_DIR, f"gold_{table_name}"))
 
@@ -257,9 +275,12 @@ def main():
         silver_consumers.alias("c")
         .join(df_consumer_metrics.alias("m"), F.col("c.customer_id") == F.col("m.customer_id"), "left")
         .select(
-            F.col("c.customer_id"), F.col("c.customer_name"), F.col("c.language"), F.col("c.created_at").alias("customer_since"), F.col("c.active"),
-            F.col("c.customer_phone_area"), F.col("c.customer_phone_number"), F.coalesce(F.col("m.lifetime_orders"), F.lit(0)).alias("lifetime_orders"),
-            F.coalesce(F.col("m.lifetime_gmv"), F.lit(0.0)).alias("lifetime_gmv"), F.coalesce(F.col("m.avg_ticket_size"), F.lit(0.0)).alias("avg_ticket_size")
+            F.col("c.customer_id"), F.col("c.customer_name"), F.col("c.language"),
+            F.col("c.created_at").alias("customer_since"), F.col("c.active"),
+            F.col("c.customer_phone_area"), F.col("c.customer_phone_number"),
+            F.coalesce(F.col("m.lifetime_orders"), F.lit(0)).alias("lifetime_orders"),
+            F.coalesce(F.col("m.lifetime_gmv"), F.lit(0.0)).alias("lifetime_gmv"),
+            F.coalesce(F.col("m.avg_ticket_size"), F.lit(0.0)).alias("avg_ticket_size")
         )
     )
     save_to_gold(df_gold_consumers, "dim_consumers")
@@ -280,40 +301,38 @@ def main():
         .select(
             F.col("r.restaurant_id"), F.col("r.merchant_city"), F.col("r.merchant_state"), F.col("r.enabled"),
             F.coalesce(F.col("m.total_orders_fulfilled"), F.lit(0)).alias("total_orders_fulfilled"),
-            F.coalesce(F.col("m.total_revenue"), F.lit(0.0)).alias("total_revenue"), F.coalesce(F.col("m.average_order_value"), F.lit(0.0)).alias("average_order_value")
+            F.coalesce(F.col("m.total_revenue"), F.lit(0.0)).alias("total_revenue"),
+            F.coalesce(F.col("m.average_order_value"), F.lit(0.0)).alias("average_order_value")
         )
     )
     save_to_gold(df_gold_restaurants, "dim_restaurants")
 
-    df_gold_orders = silver_orders.select("order_id", "customer_id", "merchant_id", "order_created_at", "order_total_amount", "delivery_address_city", "origin_platform", "order_scheduled")
+    df_gold_orders = silver_orders.select(
+        "order_id", "customer_id", "merchant_id", "order_created_at",
+        "order_total_amount", "delivery_address_city", "origin_platform", "order_scheduled"
+    )
     save_to_gold(df_gold_orders, "fct_orders")
 
-    etl_time = time.time() - start_time_pipeline
-    logger.info(f"Pipeline ETL (Bruto -> Gold ODS) concluído em {etl_time:.2f}s")
-
-
     # ==============================================================================
-    # MÓDULO DE REGRAS DE NEGÓCIO E DATA MARTS ANALÍTICOS
+    # 6. GERAÇÃO DE DATA MARTS ANALÍTICOS (GOLD)
     # ==============================================================================
-    logger.info("A calcular Data Marts Analíticos de Negócio...")
+    logger.info("A materializar Data Marts Analíticos...")
 
-    # 1. Preparar a Base do Teste
     users = (
         df_gold_consumers
-        .join(df_fct_experiments.filter(F.col('experiment_id') == 'retencao_dez18'), on='customer_id', how='left')
-        .withColumn('ab_test_group', F.when(F.col('variant_name') == 'target', 'target').otherwise('control'))
-        .drop('experiment_id', 'variant_name')
+        .join(df_fct_experiments.filter(F.col("experiment_id") == "retencao_dez18"), on="customer_id", how="left")
+        .withColumn("ab_test_group", F.when(F.col("variant_name") == "target", "target").otherwise("control"))
+        .drop("experiment_id", "variant_name")
     )
 
     base = (
         df_gold_orders
-        .withColumn('reference_date', F.date_format(F.col("order_created_at"), "yyyy-MM-dd"))
-        .withColumn('reference_month', F.date_format(F.date_trunc("month", F.col("order_created_at")), "yyyy-MM-dd"))
+        .withColumn("reference_date", F.date_format(F.col("order_created_at"), "yyyy-MM-dd"))
+        .withColumn("reference_month", F.date_format(F.date_trunc("month", F.col("order_created_at")), "yyyy-MM-dd"))
         .join(users.select("customer_id", "ab_test_group"), on="customer_id", how="left")
         .withColumn("ab_test_group", F.coalesce(F.col("ab_test_group"), F.lit("control")))
     )
 
-    # 2. Calcular Retenção
     df_retencao_m1 = (
         base
         .groupBy("customer_id", "ab_test_group")
@@ -323,19 +342,23 @@ def main():
         )
         .filter(F.col("comprou_m0") == 1)
         .groupBy("ab_test_group")
-        .agg(F.count("customer_id").alias("base_users_m0"), F.sum("comprou_m1").alias("retained_users_m1"))
+        .agg(
+            F.count("customer_id").alias("base_users_m0"),
+            F.sum("comprou_m1").alias("retained_users_m1")
+        )
         .withColumn("reference_month", F.lit("2018-12-01"))
         .withColumn("retention_m1_percentage", F.round((F.col("retained_users_m1") * 100.0) / F.col("base_users_m0"), 2))
     )
     save_to_gold(df_retencao_m1, "dm_ab_test_retention")
 
-    # 3. Resumo A/B Global
     df_resumo_total = (
         base
         .groupBy("ab_test_group")
         .agg(
-            F.countDistinct("customer_id").alias("total_users"), F.count("order_id").alias("total_orders"),
-            F.countDistinct("merchant_id").alias("unique_merchants"), F.round(F.sum("order_total_amount"), 2).alias("total_gmv")
+            F.countDistinct("customer_id").alias("total_users"),
+            F.count("order_id").alias("total_orders"),
+            F.countDistinct("merchant_id").alias("unique_merchants"),
+            F.round(F.sum("order_total_amount"), 2).alias("total_gmv")
         )
         .withColumn("frequency", F.round(F.col("total_orders") / F.col("total_users"), 2))
         .withColumn("aov", F.round(F.col("total_gmv") / F.col("total_orders"), 2))
@@ -345,13 +368,16 @@ def main():
     )
     save_to_gold(df_resumo_total, "dm_ab_test_summary")
 
-    # 4. Classificação RFV
     max_date = df_gold_orders.select(F.max("order_created_at").cast("date").cast("string")).first()[0]
     df_rfv_base = (
         df_gold_orders
         .withColumn("ref_date_calc", F.col("order_created_at").cast("date"))
         .groupBy("customer_id")
-        .agg(F.datediff(F.lit(max_date), F.max("ref_date_calc")).alias("recencia_dias"), F.countDistinct("order_id").alias("frequencia_pedidos"), F.sum("order_total_amount").alias("valor_monetario"))
+        .agg(
+            F.datediff(F.lit(max_date), F.max("ref_date_calc")).alias("recencia_dias"),
+            F.countDistinct("order_id").alias("frequencia_pedidos"),
+            F.sum("order_total_amount").alias("valor_monetario")
+        )
     )
 
     quantiles = df_rfv_base.selectExpr(
@@ -382,10 +408,28 @@ def main():
     )
     save_to_gold(df_segmentos_rfv, "customer_rfv_segments")
 
+    df_rfv_completo = base.join(df_segmentos_rfv.select("customer_id", "segmento_rfv"), on="customer_id", how="inner")
+    df_metricas = df_rfv_completo.groupBy("ab_test_group", "segmento_rfv").agg(F.countDistinct("customer_id").alias("usuarios"), F.count("order_id").alias("total_pedidos"), F.sum("order_total_amount").alias("gmv"))
+    df_retencao_seg = df_rfv_completo.groupBy("customer_id", "ab_test_group", "segmento_rfv").agg(F.max(F.when(F.col("reference_month") == "2018-12-01", 1).otherwise(0)).alias("comprou_m0"), F.max(F.when(F.col("reference_month") == "2019-01-01", 1).otherwise(0)).alias("comprou_m1")).filter(F.col("comprou_m0") == 1).groupBy("ab_test_group", "segmento_rfv").agg(F.count("customer_id").alias("base_m0"), F.sum("comprou_m1").alias("retidos_m1"))
+    window_group = Window.partitionBy("ab_test_group")
+
+    df_resultado_segmentacao = (
+        df_metricas
+        .join(df_retencao_seg, on=["ab_test_group", "segmento_rfv"], how="left")
+        .withColumn("total_usuarios_grupo", F.sum("usuarios").over(window_group))
+        .withColumn("share_%", F.round((F.col("usuarios") / F.col("total_usuarios_grupo")) * 100, 2))
+        .withColumn("frequencia", F.round(F.col("total_pedidos") / F.col("usuarios"), 2))
+        .withColumn("aov", F.round(F.col("gmv") / F.col("total_pedidos"), 2))
+        .withColumn("retencao_%", F.round((F.col("retidos_m1") / F.col("base_m0")) * 100, 2))
+        .select("ab_test_group", "segmento_rfv", "usuarios", "share_%", "frequencia", "aov", "retencao_%")
+        .orderBy(F.col("ab_test_group").desc(), F.col("usuarios").desc())
+    )
+    save_to_gold(df_resultado_segmentacao, "ab_test_rfv_metrics")
+
     # ==============================================================================
-    # CÁLCULOS ESTATÍSTICOS E APRESENTAÇÃO
+    # 7. TESTES DE HIPÓTESE ESTATÍSTICOS (Z-TEST COM GMV/USUÁRIO)
     # ==============================================================================
-    logger.info("A realizar Cálculos Estatísticos...")
+    logger.info("A calcular Testes Estatísticos Z-Test...")
 
     stats_freq = base.groupBy("customer_id", "ab_test_group").agg(F.count("order_id").alias("user_orders")).groupBy("ab_test_group").agg(F.count("user_orders").alias("n"), F.avg("user_orders").alias("mean"), F.var_samp("user_orders").alias("var")).toPandas().set_index("ab_test_group")
     stats_aov = base.groupBy("ab_test_group").agg(F.count("order_total_amount").alias("n"), F.avg("order_total_amount").alias("mean"), F.var_samp("order_total_amount").alias("var")).toPandas().set_index("ab_test_group")
@@ -397,21 +441,21 @@ def main():
     xc, nc = ret.loc["control", "retained_users_m1"], ret.loc["control", "base_users_m0"]
     pt, pc = xt / nt, xc / nc
     p_pool = (xt + xc) / (nt + nc)
-    se_ret = (p_pool * (1 - p_pool) * (1 / nt + 1 / nc)) ** 0.5
+    se_ret = (p_pool * (1.0 - p_pool) * (1.0 / nt + 1.0 / nc)) ** 0.5
     z_ret = (pt - pc) / se_ret
-    p_ret = 1 - norm.cdf(z_ret)
+    p_ret = 1.0 - norm.cdf(z_ret)
 
     se_freq = ((stats_freq.loc["target", "var"] / stats_freq.loc["target", "n"]) + (stats_freq.loc["control", "var"] / stats_freq.loc["control", "n"])) ** 0.5
     z_freq = (stats_freq.loc["target", "mean"] - stats_freq.loc["control", "mean"]) / se_freq
-    p_freq = 1 - norm.cdf(z_freq)
+    p_freq = 1.0 - norm.cdf(z_freq)
 
     se_aov = ((stats_aov.loc["target", "var"] / stats_aov.loc["target", "n"]) + (stats_aov.loc["control", "var"] / stats_aov.loc["control", "n"])) ** 0.5
     z_aov = (stats_aov.loc["target", "mean"] - stats_aov.loc["control", "mean"]) / se_aov
-    p_aov = 2 * (1 - norm.cdf(abs(z_aov)))
+    p_aov = 2.0 * (1.0 - norm.cdf(abs(z_aov)))
 
     se_gmv = ((stats_gmv.loc["target", "var"] / stats_gmv.loc["target", "n"]) + (stats_gmv.loc["control", "var"] / stats_gmv.loc["control", "n"])) ** 0.5
     z_gmv = (stats_gmv.loc["target", "mean"] - stats_gmv.loc["control", "mean"]) / se_gmv
-    p_gmv = 2 * (1 - norm.cdf(abs(z_gmv)))
+    p_gmv = 2.0 * (1.0 - norm.cdf(abs(z_gmv)))
 
     dados_testes = [
         ("Retenção", "Z-prop unilateral", float(pc), float(pt), float(p_ret), bool(p_ret < 0.05)),
@@ -420,11 +464,15 @@ def main():
         ("GMV por Usuário", "Z-mean bilateral", float(stats_gmv.loc["control", "mean"]), float(stats_gmv.loc["target", "mean"]), float(p_gmv), bool(p_gmv < 0.05))
     ]
 
-    schema_testes = T.StructType([T.StructField("metrica", T.StringType(), True), T.StructField("teste", T.StringType(), True), T.StructField("ctrl", T.DoubleType(), True), T.StructField("tgt", T.DoubleType(), True), T.StructField("p_valor", T.DoubleType(), True), T.StructField("significativo", T.BooleanType(), True)])
+    schema_testes = T.StructType([
+        T.StructField("metrica", T.StringType(), True), T.StructField("teste", T.StringType(), True),
+        T.StructField("ctrl", T.DoubleType(), True), T.StructField("tgt", T.DoubleType(), True),
+        T.StructField("p_valor", T.DoubleType(), True), T.StructField("significativo", T.BooleanType(), True)
+    ])
 
-    print("=" * 60)
+    print("\n" + "=" * 70)
     print("🔬 RESULTADO DOS TESTES DE HIPÓTESE ESTATÍSTICA (A/B)")
-    print("=" * 60)
+    print("=" * 70)
     (
         spark.createDataFrame(dados_testes, schema_testes)
         .withColumn("ctrl", F.when(F.col("metrica") == "Retenção", F.round(F.col("ctrl"), 4)).otherwise(F.round(F.col("ctrl"), 2)))
@@ -433,36 +481,300 @@ def main():
     ).show(truncate=False)
 
     # ==============================================================================
-    # OTIMIZAÇÃO E MODELAÇÃO FINANCEIRA
+    # 8. ANÁLISE DE VIABILIDADE GLOBAL DO TESTE A/B (18 MESES COM DESMAME)
     # ==============================================================================
+    logger.info("A calcular Viabilidade Global do Teste A/B...")
     df_v = df_resumo_total.toPandas().set_index("ab_test_group")
-    df_quadrantes = df_segmentos_rfv.withColumn("quadrante", F.when(F.col("segmento_rfv").isin("Campeões", "Clientes Fiéis"), "AVA").when(F.col("segmento_rfv").isin("Não Podemos Perder", "Em Risco"), "AVR").when(F.col("segmento_rfv").isin("Novos Clientes", "Potenciais Fiéis", "Promissores", "Precisam de Atenção"), "BVA").otherwise("BVR"))
-    df_compradores_jan19 = base.filter(F.col("reference_month") == "2019-01-01").select("customer_id").distinct().join(df_quadrantes.select("customer_id", "quadrante"), on="customer_id", how="inner").groupBy("quadrante").agg(F.countDistinct("customer_id").alias("count")).toPandas().set_index("quadrante")
+
+    gmv_target = float(df_v.loc["target", "total_gmv"])
+    gmv_control = float(df_v.loc["control", "total_gmv"])
+    pedidos_target = float(df_v.loc["target", "total_orders"])
+    pedidos_control = float(df_v.loc["control", "total_orders"])
+    users_target = float(df_v.loc["target", "total_users"])
+    users_control = float(df_v.loc["control", "total_users"])
+
+    base_coorte_m0 = float(df_v.loc["target", "base_users_m0"])
+    ret_target = float(df_v.loc["target", "retained_users_m1"] / base_coorte_m0)
+    ret_control = float(df_v.loc["control", "retained_users_m1"] / float(df_v.loc["control", "base_users_m0"]))
+    aov_target = float(df_v.loc["target", "aov"])
+    aov_control = float(df_v.loc["control", "aov"])
+
+    df_jan_tgt = base.filter((F.col("reference_month") == "2019-01-01") & (F.col("ab_test_group") == "target"))
+    freq_recorrente_jan = float(df_jan_tgt.count() / df_jan_tgt.select("customer_id").distinct().count())
+
+    take_rate = 0.15
+    CUSTO_UNITARIO_CUPOM = 5.00
+    PCT_PEDIDOS_COM_CUPOM = 1.00
+
+    lift_retencao_pp = (ret_target - ret_control) * 100.0
+    usuarios_ativos_dez = base_coorte_m0
+    retidos_incrementais_mes = base_coorte_m0 * (ret_target - ret_control)
+    gmv_usuario_jan = freq_recorrente_jan * aov_control
+    receita_incremental_mes = retidos_incrementais_mes * (gmv_usuario_jan * take_rate)
+
+    gmv_incremental_imediato = gmv_target - gmv_control
+    receita_imediata_teste = gmv_incremental_imediato * take_rate
+    custo_total_cupons_teste = pedidos_target * PCT_PEDIDOS_COM_CUPOM * CUSTO_UNITARIO_CUPOM
+    deficit_campanha = custo_total_cupons_teste - receita_imediata_teste
+    payback_meses = deficit_campanha / receita_incremental_mes
+
+    indicadores_resumo_global = [
+        ("Usuários Target Ativos (Dez/18)", f"{users_target/1e3:.1f}k usuários"),
+        ("Usuários Controle Ativos (Dez/18)", f"{users_control/1e3:.1f}k usuários"),
+        ("Pedidos Totais Target (M0)", f"{pedidos_target/1e3:.1f}k pedidos"),
+        ("Ticket Médio (AOV) Target", f"R$ {aov_target:.2f}"),
+        ("Ticket Médio (AOV) Controle", f"R$ {aov_control:.2f}"),
+        ("Frequência Recorrente M+1 (Jan/19)", f"{freq_recorrente_jan:.2f} pedidos"),
+        ("GMV Incremental Imediato (M0)", f"R$ {gmv_incremental_imediato/1e6:.2f}M"),
+        ("Receita Bruta Incremental (M0)", f"R$ {receita_imediata_teste/1e6:.2f}M"),
+        ("Custo Total de Cupons (M0)", f"R$ {custo_total_cupons_teste/1e6:.2f}M"),
+        ("Déficit Líquido Inicial da Ação", f"-R$ {deficit_campanha/1e6:.2f}M"),
+        ("Lift de Retenção Observado", f"+{lift_retencao_pp:.2f} pp"),
+        ("Clientes Retidos Salvos do Churn / Mês", f"{retidos_incrementais_mes/1e3:.1f}k usuários"),
+        ("Margem Recorrente Incremental / Mês", f"R$ {receita_incremental_mes/1e3:.1f}k"),
+        ("Tempo de Payback Estimado", f"{payback_meses:.1f} meses")
+    ]
+
+    schema_resumo_global = T.StructType([
+        T.StructField("Métrica / Premissa Executiva", T.StringType(), True),
+        T.StructField("Valor Consolidado", T.StringType(), True)
+    ])
+
+    print("\n" + "=" * 70)
+    print("📊 INDICADORES EXECUTIVOS DE VIABILIDADE GLOBAL (TESTE GERAL A/B)")
+    print("=" * 70)
+    spark.createDataFrame(indicadores_resumo_global, schema_resumo_global).show(truncate=False)
+
+    decay_cupom_pct = {0: 1.00, 1: 0.20, 2: 0.10, 3: 0.05}
+    dados_projecao_global = []
+    rec_acumulada, custo_acumulado = 0.0, 0.0
+
+    for m in range(19):
+        rotulo_mes = "Mês 0 (Campanha)" if m == 0 else f"M+{m}"
+        if m == 0:
+            gmv_mes = gmv_target - gmv_control
+            rec_mes = gmv_mes * take_rate
+            custo_mes = custo_total_cupons_teste
+        else:
+            gmv_mes = retidos_incrementais_mes * gmv_usuario_jan
+            rec_mes = gmv_mes * take_rate
+            pct_cupom_mes = decay_cupom_pct.get(m, 0.00)
+            pedidos_mes_retidos = retidos_incrementais_mes * freq_recorrente_jan
+            custo_mes = pedidos_mes_retidos * pct_cupom_mes * CUSTO_UNITARIO_CUPOM
+
+        res_mes = rec_mes - custo_mes
+        rec_acumulada += rec_mes
+        custo_acumulado += custo_mes
+        res_acumulado = rec_acumulada - custo_acumulado
+        roi_acumulado = rec_acumulada / custo_acumulado if custo_acumulado > 0 else 0.0
+
+        dados_projecao_global.append({
+            "mes_timeline": rotulo_mes,
+            "gmv_incremental_mes": round(gmv_mes, 2),
+            "receita_ifood_mes": round(rec_mes, 2),
+            "custo_cupons_mes": round(custo_mes, 2),
+            "resultado_liquido_mes": round(res_mes, 2),
+            "resultado_acumulado": round(res_acumulado, 2),
+            "roi_acumulado": round(roi_acumulado, 3)
+        })
+
+    df_proj_global = pd.DataFrame(dados_projecao_global)
+    print("\n--- FLUXO FINANCEIRO PROJETADO (18 MESES COM DESMAME) ---")
+    spark.createDataFrame(df_proj_global).show(truncate=False)
+
+    # ==============================================================================
+    # 9. ANÁLISE DE VIABILIDADE SEGMENTADA (MONOCOMPRADORES COM TETO E CONVERSÃO 75%)
+    # ==============================================================================
+    logger.info("A calcular Viabilidade Segmentada para Monocompradores...")
+    pct_target = 0.90
+    novo_cpo = 5.00
+    max_cupons_por_usuario = 1
+    conversao_cupom = 0.75
+    lift_frequencia_estimado = 0.135
+    lift_retencao_estimado = 0.10
+
+    pdf_jan = (
+        base
+        .filter(F.col("reference_month") == "2019-01-01")
+        .groupBy("customer_id")
+        .agg(
+            F.count("order_id").alias("pedidos_jan"),
+            F.sum("order_total_amount").alias("gmv_jan")
+        )
+        .filter(F.col("pedidos_jan") == 1)
+        .agg(
+            F.count("customer_id").alias("total_monocompradores_jan"),
+            F.sum("pedidos_jan").alias("total_pedidos_jan"),
+            F.sum("gmv_jan").alias("total_gmv_jan")
+        )
+        .toPandas()
+    )
+
+    total_monocompradores_jan = float(pdf_jan["total_monocompradores_jan"].values[0])
+    total_pedidos_jan = float(pdf_jan["total_pedidos_jan"].values[0])
+    total_gmv_jan = float(pdf_jan["total_gmv_jan"].values[0])
+
+    freq_ctrl = total_pedidos_jan / total_monocompradores_jan
+    aov_ctrl = total_gmv_jan / total_pedidos_jan
+    gmv_medio_user_ctrl = freq_ctrl * aov_ctrl
+    freq_m1 = freq_ctrl * (1.0 + lift_frequencia_estimado)
+
+    AUDIENCIA_TARGET = float(np.round(total_monocompradores_jan * pct_target))
+    audiencia_control = float(np.round(total_monocompradores_jan * (1.0 - pct_target)))
+
+    delta_aov_empirico_pct = (aov_target - aov_control) / aov_control
+    aov_target_ponderado = aov_ctrl * (1.0 + (delta_aov_empirico_pct * conversao_cupom))
+    pedidos_target_mono = AUDIENCIA_TARGET * freq_m1
+
+    cupons_utilizados_target = float(min(pedidos_target_mono * conversao_cupom, AUDIENCIA_TARGET * max_cupons_por_usuario))
+    gmv_target_mono = pedidos_target_mono * aov_target_ponderado
+    receita_incremental_m0 = (gmv_target_mono - (AUDIENCIA_TARGET * gmv_medio_user_ctrl)) * take_rate
+    custo_total_subsidy_m0 = cupons_utilizados_target * novo_cpo
+    deficit_liquido_campanha = custo_total_subsidy_m0 - receita_incremental_m0
+
+    usuarios_salvos_churn = AUDIENCIA_TARGET * lift_retencao_estimado
+    margem_recorrente_mensal = usuarios_salvos_churn * ((freq_m1 * aov_ctrl) * take_rate)
+    payback_deficit_liquido = deficit_liquido_campanha / margem_recorrente_mensal if (deficit_liquido_campanha > 0 and margem_recorrente_mensal > 0) else 0.0
+
+    indicadores_novo_teste = [
+        ("Monocompradores Elegíveis (Jan/19)", f"{total_monocompradores_jan/1e3:.1f}k usuários"),
+        ("Grupo Target (90%)", f"{AUDIENCIA_TARGET/1e3:.1f}k usuários"),
+        ("Grupo Controle (10%)", f"{audiencia_control/1e3:.1f}k usuários"),
+        ("AOV Orgânico (Controle)", f"R$ {aov_ctrl:.2f}"),
+        ("AOV Target Estimado (com conversão)", f"R$ {aov_target_ponderado:.2f}"),
+        ("Frequência M+1 Calculada", f"{freq_m1:.3f} pedidos"),
+        ("Taxa de Conversão do Cupom", f"{conversao_cupom*100:.0f}%"),
+        ("Teto de Cupons por Usuário", f"{max_cupons_por_usuario} cupom"),
+        ("Total de Cupons Utilizados", f"{cupons_utilizados_target/1e3:.1f}k cupons"),
+        ("Custo Total dos Cupons (M0)", f"R$ {custo_total_subsidy_m0/1e6:.2f}M"),
+        ("Receita Incremental Imediata (M0)", f"R$ {receita_incremental_m0/1e3:.1f}k"),
+        ("Déficit Inicial da Ação", f"-R$ {deficit_liquido_campanha/1e6:.2f}M"),
+        ("Lift de Retenção Estimado", f"+{lift_retencao_estimado*100:.1f} pp"),
+        ("Usuários Salvos do Churn / Mês", f"{usuarios_salvos_churn/1e3:.1f}k usuários"),
+        ("Margem Orgânica Recorrente / Mês", f"R$ {margem_recorrente_mensal/1e3:.1f}k"),
+        ("Tempo de Payback Estimado", f"{payback_deficit_liquido:.1f} meses")
+    ]
+
+    schema_resumo_teste = T.StructType([
+        T.StructField("Métrica / Premissa", T.StringType(), True),
+        T.StructField("Valor Projetado", T.StringType(), True)
+    ])
+
+    print("\n" + "=" * 70)
+    print("🎯 VIABILIDADE DA AÇÃO PARA MONOCOMPRADORES (TETO DE 1 CUPOM E CONV. 75%)")
+    print("=" * 70)
+    spark.createDataFrame(indicadores_novo_teste, schema_resumo_teste).show(truncate=False)
+
+    dados_projecao_mono = []
+    for mes_idx in range(13):
+        rotulo = "Mês 0 (Campanha)" if mes_idx == 0 else f"M+{mes_idx}"
+        if mes_idx == 0:
+            gmv_mes = gmv_target_mono - (AUDIENCIA_TARGET * gmv_medio_user_ctrl)
+            rec_mes = receita_incremental_m0
+            custo_mes = custo_total_subsidy_m0
+        else:
+            pedidos_org_salvos = usuarios_salvos_churn * freq_m1
+            gmv_mes = pedidos_org_salvos * aov_ctrl
+            rec_mes = margem_recorrente_mensal
+            custo_mes = 0.0
+
+        res_mes = rec_mes - custo_mes
+        rec_acum = receita_incremental_m0 + (mes_idx * margem_recorrente_mensal)
+        res_acum = rec_acum - custo_total_subsidy_m0
+        roi_acum = rec_acum / custo_total_subsidy_m0 if custo_total_subsidy_m0 > 0 else 0.0
+
+        dados_projecao_mono.append({
+            "mes_timeline": rotulo,
+            "gmv_incremental_mes": float(round(gmv_mes, 2)),
+            "receita_ifood_mes": float(round(rec_mes, 2)),
+            "custo_cupons_mes": float(round(custo_mes, 2)),
+            "resultado_liquido_mes": float(round(res_mes, 2)),
+            "resultado_acumulado": float(round(res_acum, 2)),
+            "roi_acumulado": float(round(roi_acum, 3))
+        })
+
+    df_proj_mono = pd.DataFrame(dados_projecao_mono)
+    print("\n--- FLUXO PROJETADO DE MONOCOMPRADORES (12 MESES) ---")
+    spark.createDataFrame(df_proj_mono).show(truncate=False)
+
+    # ==============================================================================
+    # 10. OTIMIZAÇÃO DE CPO (MODELAGEM 12M DE DESMAME E CHURN LINEAR)
+    # ==============================================================================
+    logger.info("A calcular Modelagem de Otimização de CPO a 12 Meses...")
+
+    df_quadrantes = df_segmentos_rfv.withColumn(
+        "quadrante",
+        F.when(F.col("segmento_rfv").isin("Campeões", "Clientes Fiéis"), "AVA")
+        .when(F.col("segmento_rfv").isin("Não Podemos Perder", "Em Risco"), "AVR")
+        .when(F.col("segmento_rfv").isin("Novos Clientes", "Potenciais Fiéis", "Promissores", "Precisam de Atenção"), "BVA")
+        .otherwise("BVR")
+    )
+
+    df_compradores_jan19 = (
+        base
+        .filter(F.col("reference_month") == "2019-01-01")
+        .select("customer_id").distinct()
+        .join(df_quadrantes.select("customer_id", "quadrante"), on="customer_id", how="inner")
+        .groupBy("quadrante")
+        .agg(F.countDistinct("customer_id").alias("count"))
+        .toPandas().set_index("quadrante")
+    )
 
     quadrantes = ["AVA", "AVR", "BVA", "BVR"]
     pop_inicial = np.array([float(df_compradores_jan19.loc[q, "count"]) if q in df_compradores_jan19.index else 0.0 for q in quadrantes])
     total_ativos_jan_real = int(pop_inicial.sum())
 
-    premissas_metricas = {"AVA": {"aov": 47.94, "freq": 3.58}, "AVR": {"aov": 50.95, "freq": 1.29}, "BVA": {"aov": 47.78, "freq": 1.17}, "BVR": {"aov": 50.32, "freq": 1.00}}
-    take_rate = 0.15; adocao_cupom = 0.75; AQUISICAO_MENSAL = float(round(total_ativos_jan_real * 0.13)); CUSTO_ONBOARDING = 5.5
-    CHURN_BASE = {"AVA": 0.15, "AVR": 0.70, "BVA": 0.15, "BVR": 0.70}; sensibilidade_cpo = 0.010; reducao_churn_habito = 0.0035
+    premissas_metricas = {
+        "AVA": {"aov": 47.94, "freq": 3.58},
+        "AVR": {"aov": 50.95, "freq": 1.29},
+        "BVA": {"aov": 47.78, "freq": 1.17},
+        "BVR": {"aov": 50.32, "freq": 1.00}
+    }
 
-    cpo_politica = {"AVA": [5.0, 4.5, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5, 1.5, 1.5, 1.5, 1.5], "AVR": [5.0, 5.5, 5.5, 5.5, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0], "BVA": [5.0, 4.5, 4.0, 3.5, 3.0, 2.5, 2.5, 2.0, 2.0, 2.0, 2.0, 2.0], "BVR": [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+    adocao_cupom = 0.75
+    AQUISICAO_MENSAL = float(round(total_ativos_jan_real * 0.13))
+    CUSTO_ONBOARDING = 5.50
+    CHURN_BASE = {"AVA": 0.15, "AVR": 0.70, "BVA": 0.15, "BVR": 0.70}
+    sensibilidade_cpo = 0.010
+    reducao_churn_habito = 0.0035
+
+    cpo_politica = {
+        "AVA": [5.0, 4.5, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5, 1.5, 1.5, 1.5, 1.5],
+        "AVR": [5.0, 5.5, 5.5, 5.5, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+        "BVA": [5.0, 4.5, 4.0, 3.5, 3.0, 2.5, 2.5, 2.0, 2.0, 2.0, 2.0, 2.0],
+        "BVR": [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    }
+
     rotulos_meses = ["Jan/19", "Fev/19", "Mar/19", "Abr/19", "Mai/19", "Jun/19", "Jul/19", "Ago/19", "Set/19", "Out/19", "Nov/19", "Dez/19"]
-
     u_ava, u_avr, u_bva, u_bvr = pop_inicial
     dados_simulacao = []
 
     for m in range(12):
         mes_str = rotulos_meses[m]
         total_ativos_inicio = u_ava + u_avr + u_bva + u_bvr
-        c_ava, c_avr, c_bva, c_bvr = cpo_politica["AVA"][m], cpo_politica["AVR"][m], cpo_politica["BVA"][m], cpo_politica["BVR"][m]
-        p_ava = u_ava * premissas_metricas["AVA"]["freq"]; p_avr = u_avr * premissas_metricas["AVR"]["freq"]; p_bva = u_bva * premissas_metricas["BVA"]["freq"]; p_bvr = u_bvr * premissas_metricas["BVR"]["freq"]
-        total_pedidos_ativos = p_ava + p_avr + p_bva + p_bvr
-        frequencia_geral = total_pedidos_ativos / total_ativos_inicio if total_ativos_inicio > 0 else 0.0
 
-        cost_marketing_total = (p_ava * c_ava * adocao_cupom) + (p_avr * c_avr * adocao_cupom) + (p_bva * c_bva * adocao_cupom) + (p_bvr * c_bvr * (adocao_cupom if c_bvr > 0 else 0.0)) + (AQUISICAO_MENSAL * CUSTO_ONBOARDING)
-        rec_total_pedidos = (p_ava * premissas_metricas["AVA"]["aov"] + p_avr * premissas_metricas["AVR"]["aov"] + p_bva * premissas_metricas["BVA"]["aov"] + p_bvr * premissas_metricas["BVR"]["aov"]) * take_rate
+        c_ava, c_avr, c_bva, c_bvr = cpo_politica["AVA"][m], cpo_politica["AVR"][m], cpo_politica["BVA"][m], cpo_politica["BVR"][m]
+
+        p_ava = u_ava * premissas_metricas["AVA"]["freq"]
+        p_avr = u_avr * premissas_metricas["AVR"]["freq"]
+        p_bva = u_bva * premissas_metricas["BVA"]["freq"]
+        p_bvr = u_bvr * premissas_metricas["BVR"]["freq"]
+
+        cost_marketing_total = (
+            (p_ava * c_ava * adocao_cupom) +
+            (p_avr * c_avr * adocao_cupom) +
+            (p_bva * c_bva * adocao_cupom) +
+            (p_bvr * c_bvr * (adocao_cupom if c_bvr > 0 else 0.0)) +
+            (AQUISICAO_MENSAL * CUSTO_ONBOARDING)
+        )
+
+        rec_total_pedidos = (
+            p_ava * premissas_metricas["AVA"]["aov"] +
+            p_avr * premissas_metricas["AVR"]["aov"] +
+            p_bva * premissas_metricas["BVA"]["aov"] +
+            p_bvr * premissas_metricas["BVR"]["aov"]
+        ) * take_rate
+
         lucro_pedidos = rec_total_pedidos - cost_marketing_total
 
         churn_ava = max(0.04, CHURN_BASE["AVA"] - (sensibilidade_cpo * c_ava) - (reducao_churn_habito * m))
@@ -476,50 +788,242 @@ def main():
         usuarios_salvos_avr = max(0.0, (CHURN_BASE["AVR"] - churn_avr) * u_avr)
         lucro_total = lucro_pedidos + (usuarios_salvos_avr * (premissas_metricas["AVA"]["freq"] * premissas_metricas["AVA"]["aov"] * take_rate))
 
-        dados_simulacao.append({"mes_referencia": mes_str, "cpo_alto_ativo": round(c_ava, 2), "cpo_alto_risco": round(c_avr, 2), "cpo_baixo_ativo": round(c_bva, 2), "cpo_baixo_risco": round(c_bvr, 2), "total_ativos": int(round(total_ativos_inicio)), "taxa_churn_total_pct": round(taxa_churn_total_pct, 2), "lucro_total_liquido": int(round(lucro_total))})
+        dados_simulacao.append({
+            "mes_referencia": mes_str,
+            "cpo_alto_ativo": round(c_ava, 2),
+            "cpo_alto_risco": round(c_avr, 2),
+            "cpo_baixo_ativo": round(c_bva, 2),
+            "cpo_baixo_risco": round(c_bvr, 2),
+            "total_ativos": int(round(total_ativos_inicio)),
+            "taxa_churn_total_pct": round(taxa_churn_total_pct, 2),
+            "lucro_total_liquido": int(round(lucro_total))
+        })
 
-        retidos_ava, retidos_avr, retidos_bva, retidos_bvr = u_ava * (1.0 - churn_ava), u_avr * (1.0 - churn_avr), u_bva * (1.0 - churn_bva), u_bvr * (1.0 - churn_bvr)
+        retidos_ava = u_ava * (1.0 - churn_ava)
+        retidos_avr = u_avr * (1.0 - churn_avr)
+        retidos_bva = u_bva * (1.0 - churn_bva)
+        retidos_bvr = u_bvr * (1.0 - churn_bvr)
+
         upgrade_bva_para_ava = retidos_bva * 0.05
-        u_ava = retidos_ava + upgrade_bva_para_ava; u_avr = retidos_avr; u_bva = (retidos_bva - upgrade_bva_para_ava) + AQUISICAO_MENSAL; u_bvr = retidos_bvr
+        u_ava = retidos_ava + upgrade_bva_para_ava
+        u_avr = retidos_avr
+        u_bva = (retidos_bva - upgrade_bva_para_ava) + AQUISICAO_MENSAL
+        u_bvr = retidos_bvr
 
     df_simulacao_pd = pd.DataFrame(dados_simulacao)
-    print("=" * 60)
-    print("💰 TABELA DE EVOLUÇÃO E DESMAME DE CPO")
-    print("=" * 60)
+    save_to_gold(spark.createDataFrame(df_simulacao_pd), "dm_financial_cpo_projection")
+
+    print("\n" + "=" * 70)
+    print("💰 TABELA DE EVOLUÇÃO E DESMAME DE CPO (MODELAGEM 12 MESES)")
+    print("=" * 70)
     spark.createDataFrame(df_simulacao_pd).show(truncate=False)
 
     # ==============================================================================
-    # GRÁFICOS (Guardados como PNG em vez de Display)
+    # 11. EXPORTAÇÃO DE TODOS OS GRÁFICOS EM DISCO (PNG)
     # ==============================================================================
-    logger.info("A gerar gráficos e a guardá-los em disco...")
-    PLOTS_DIR = "./ifood_plots"
-    os.makedirs(PLOTS_DIR, exist_ok=True)
-    plt.rcParams['font.sans-serif'] = 'DejaVu Sans'
+    logger.info("A gerar e exportar todos os gráficos para ./ifood_plots/...")
+    plt.close("all")
+    plt.rcParams["font.sans-serif"] = "DejaVu Sans"
 
+    # Gráfico 1: Dashboard 2x2 do Teste A/B
+    fig_ab, axes = plt.subplots(2, 2, figsize=(14, 10))
+    colors_ab = ["#ea1d2c", "#555555"]
+    groups_ab = ["Target (Cupom)", "Controle"]
+
+    def clean_axis(ax, title):
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=15)
+        ax.grid(False)
+        for spine in ["top", "right", "left"]:
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_visible(True)
+        ax.set_yticks([])
+
+    # GMV
+    gmv_tgt_m = gmv_target / 1e6
+    gmv_ctrl_m = gmv_control / 1e6
+    bars1 = axes[0, 0].bar(groups_ab, [gmv_tgt_m, gmv_ctrl_m], color=colors_ab, width=0.4)
+    clean_axis(axes[0, 0], "GMV Total (R$ Milhões)")
+    axes[0, 0].set_ylim(0, max(gmv_tgt_m, gmv_ctrl_m) * 1.35)
+    for bar in bars1:
+        y = bar.get_height()
+        axes[0, 0].text(bar.get_x() + bar.get_width() / 2.0, y + 2.0, f"R$ {y:.1f}M", ha="center", va="bottom", fontweight="bold", fontsize=11)
+
+    # AOV
+    bars2 = axes[0, 1].bar(groups_ab, [aov_target, aov_control], color=colors_ab, width=0.4)
+    clean_axis(axes[0, 1], "Ticket Médio / AOV (R$)")
+    axes[0, 1].set_ylim(0, max(aov_target, aov_control) * 1.35)
+    for bar in bars2:
+        y = bar.get_height()
+        axes[0, 1].text(bar.get_x() + bar.get_width() / 2.0, y + 1.5, f"R$ {y:.1f}", ha="center", va="bottom", fontweight="bold", fontsize=11)
+
+    # Frequência
+    freq_tgt = float(df_v.loc["target", "frequency"])
+    freq_ctrl_v = float(df_v.loc["control", "frequency"])
+    bars3 = axes[1, 0].bar(groups_ab, [freq_tgt, freq_ctrl_v], color=colors_ab, width=0.4)
+    clean_axis(axes[1, 0], "Frequência de Pedidos (Pedidos/Usuário)")
+    axes[1, 0].set_ylim(0, max(freq_tgt, freq_ctrl_v) * 1.35)
+    for bar in bars3:
+        y = bar.get_height()
+        axes[1, 0].text(bar.get_x() + bar.get_width() / 2.0, y + 0.05, f"{y:.2f}", ha="center", va="bottom", fontweight="bold", fontsize=11)
+
+    # Retenção
+    ret_tgt_p = float(df_v.loc["target", "retention_m1_percentage"])
+    ret_ctrl_p = float(df_v.loc["control", "retention_m1_percentage"])
+    bars4 = axes[1, 1].bar(groups_ab, [ret_tgt_p, ret_ctrl_p], color=colors_ab, width=0.4)
+    clean_axis(axes[1, 1], "Taxa de Retenção M+1 (%)")
+    axes[1, 1].set_ylim(0, 100)
+    for bar in bars4:
+        y = bar.get_height()
+        axes[1, 1].text(bar.get_x() + bar.get_width() / 2.0, y + 2.0, f"{y:.1f}%", ha="center", va="bottom", fontweight="bold", fontsize=11)
+
+    fig_ab.suptitle("Dashboard Executivo do Teste A/B iFood", fontsize=16, fontweight="bold", y=0.98)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig_ab.savefig(os.path.join(PLOTS_DIR, "dashboard_ab_test.png"), dpi=300)
+    plt.close(fig_ab)
+
+    # Gráfico 2: Payback Global (18 Meses)
+    meses_glob_idx = np.arange(19)
+    fig_pb_glob, ax_glob = plt.subplots(figsize=(10.5, 5))
+    deficit_linha_glob = [deficit_campanha] * len(meses_glob_idx)
+    retorno_linha_glob = [m * receita_incremental_mes for m in meses_glob_idx]
+
+    ax_glob.plot(meses_glob_idx, deficit_linha_glob, color="#555555", linestyle="--", linewidth=2, label=f"Déficit Inicial (R$ {deficit_campanha/1e6:.2f}M)")
+    ax_glob.plot(meses_glob_idx, retorno_linha_glob, color="#ea1d2c", linewidth=3, label="Retorno Acumulado (Margem dos Retidos)")
+    ax_glob.fill_between(
+        meses_glob_idx, retorno_linha_glob, deficit_linha_glob,
+        where=(np.array(retorno_linha_glob) >= np.array(deficit_linha_glob)),
+        color="#28a745", alpha=0.15, interpolate=True, label="Zona de Retorno Positivo"
+    )
+    if 0 < payback_meses <= 18:
+        ax_glob.axvline(x=payback_meses, color="#28a745", linestyle=":", linewidth=2.5)
+        ax_glob.text(payback_meses + 0.3, float(deficit_campanha) * 0.45, f"Break-Even:\n{payback_meses:.1f} meses", color="#28a745", fontweight="bold", fontsize=11)
+
+    ax_glob.set_title("Curva de Viabilidade Global: Payback Impulsionado pelo Lift de Retenção", fontsize=12, fontweight="bold", pad=15)
+    ax_glob.set_xlabel("Horizonte Temporal Pós-Campanha (Meses)", fontsize=10, fontweight="bold")
+    ax_glob.set_ylabel("Valor Financeiro (R$)", fontsize=10, fontweight="bold")
+    ax_glob.set_xticks(range(0, 19, 2))
+    ax_glob.grid(axis="y", linestyle="--", alpha=0.3)
+    ax_glob.legend(frameon=True, facecolor="white", loc="upper left")
+    ax_glob.spines["top"].set_visible(False)
+    ax_glob.spines["right"].set_visible(False)
+    plt.tight_layout()
+    fig_pb_glob.savefig(os.path.join(PLOTS_DIR, "payback_global.png"), dpi=300)
+    plt.close(fig_pb_glob)
+
+    # Gráfico 3: Payback Segmentado (Monocompradores)
+    meses_mono_idx = np.arange(13)
+    fig_pb_mono, ax_mono = plt.subplots(figsize=(10.5, 5))
+    ax_mono.plot(meses_mono_idx, [deficit_liquido_campanha] * len(meses_mono_idx), color="#555555", linestyle="--", linewidth=2, label=f"Déficit Inicial (R$ {deficit_liquido_campanha/1e6:.2f}M)")
+    ax_mono.plot(meses_mono_idx, [m * margem_recorrente_mensal for m in meses_mono_idx], color="#ea1d2c", linewidth=3, label="Retorno Acumulado dos Usuários Retidos")
+    ax_mono.fill_between(
+        meses_mono_idx, [m * margem_recorrente_mensal for m in meses_mono_idx], [deficit_liquido_campanha] * len(meses_mono_idx),
+        where=(np.array([m * margem_recorrente_mensal for m in meses_mono_idx]) >= np.array([deficit_liquido_campanha] * len(meses_mono_idx))),
+        color="#28a745", alpha=0.15, interpolate=True, label="Zona de Lucro Líquido"
+    )
+    if 0 < payback_deficit_liquido <= 12:
+        ax_mono.axvline(x=payback_deficit_liquido, color="#28a745", linestyle=":", linewidth=2.5)
+        ax_mono.text(
+            payback_deficit_liquido + 0.25, float(deficit_liquido_campanha) * 0.45,
+            f"Break-Even:\n{payback_deficit_liquido:.1f} meses\n(~{int(payback_deficit_liquido * 30)} dias)",
+            color="#28a745", fontweight="bold", fontsize=10.5
+        )
+
+    ax_mono.set_title("Novo Teste: Curva de Payback com Teto de 1 Cupom e Lift de +10 pp", fontsize=12, fontweight="bold", pad=15)
+    ax_mono.set_xlabel("Horizonte Temporal Pós-Campanha (Meses)", fontsize=10, fontweight="bold")
+    ax_mono.set_ylabel("Valor Financeiro (R$)", fontsize=10, fontweight="bold")
+    ax_mono.set_xticks(range(0, 13))
+    ax_mono.grid(axis="y", linestyle="--", alpha=0.3)
+    ax_mono.legend(frameon=True, facecolor="white", loc="upper left")
+    ax_mono.spines["top"].set_visible(False)
+    ax_mono.spines["right"].set_visible(False)
+    plt.tight_layout()
+    fig_pb_mono.savefig(os.path.join(PLOTS_DIR, "payback_segmentado_mono.png"), dpi=300)
+    plt.close(fig_pb_mono)
+
+    # Gráfico 4: Otimização de CPO - Desmame por Quadrante
     x_cpo = np.arange(len(df_simulacao_pd["mes_referencia"]))
     meses_labels = df_simulacao_pd["mes_referencia"]
 
     fig_cpo, ax1 = plt.subplots(figsize=(10.5, 5))
-    ax1.plot(x_cpo, df_simulacao_pd["cpo_alto_ativo"], marker='o', linewidth=2.5, color='#b5121e', label='CPO Alto Valor Ativo')
-    ax1.plot(x_cpo, df_simulacao_pd["cpo_alto_risco"], marker='s', linewidth=2.5, color='#28a745', label='CPO Alto Valor Risco')
-    ax1.plot(x_cpo, df_simulacao_pd["cpo_baixo_ativo"], marker='^', linewidth=2.5, color='#007bff', label='CPO Baixo Valor Ativo')
-    ax1.plot(x_cpo, df_simulacao_pd["cpo_baixo_risco"], marker='x', linewidth=2.2, color='#6c757d', linestyle=':', label='CPO Baixo Valor Risco')
+    ax1.plot(x_cpo, df_simulacao_pd["cpo_alto_ativo"], marker="o", linewidth=2.5, color="#b5121e", label="CPO Alto Valor Ativo")
+    ax1.plot(x_cpo, df_simulacao_pd["cpo_alto_risco"], marker="s", linewidth=2.5, color="#28a745", label="CPO Alto Valor Risco")
+    ax1.plot(x_cpo, df_simulacao_pd["cpo_baixo_ativo"], marker="^", linewidth=2.5, color="#007bff", label="CPO Baixo Valor Ativo")
+    ax1.plot(x_cpo, df_simulacao_pd["cpo_baixo_risco"], marker="x", linewidth=2.2, color="#6c757d", linestyle=":", label="CPO Baixo Valor Risco")
 
     for i in range(len(x_cpo)):
-        ax1.annotate(f"R${df_simulacao_pd['cpo_alto_ativo'][i]:.1f}", (x_cpo[i], df_simulacao_pd['cpo_alto_ativo'][i]), textcoords="offset points", xytext=(0, -13), ha='center', fontsize=8, color='#b5121e')
-        ax1.annotate(f"R${df_simulacao_pd['cpo_alto_risco'][i]:.1f}", (x_cpo[i], df_simulacao_pd['cpo_alto_risco'][i]), textcoords="offset points", xytext=(0, 6), ha='center', fontsize=8, color='#28a745')
-        ax1.annotate(f"R${df_simulacao_pd['cpo_baixo_ativo'][i]:.1f}", (x_cpo[i], df_simulacao_pd['cpo_baixo_ativo'][i]), textcoords="offset points", xytext=(0, 6), ha='center', fontsize=8, color='#007bff')
+        ax1.annotate(f"R${df_simulacao_pd['cpo_alto_ativo'][i]:.1f}", (x_cpo[i], df_simulacao_pd["cpo_alto_ativo"][i]), textcoords="offset points", xytext=(0, -13), ha="center", fontsize=8, color="#b5121e")
+        ax1.annotate(f"R${df_simulacao_pd['cpo_alto_risco'][i]:.1f}", (x_cpo[i], df_simulacao_pd["cpo_alto_risco"][i]), textcoords="offset points", xytext=(0, 6), ha="center", fontsize=8, color="#28a745")
+        ax1.annotate(f"R${df_simulacao_pd['cpo_baixo_ativo'][i]:.1f}", (x_cpo[i], df_simulacao_pd["cpo_baixo_ativo"][i]), textcoords="offset points", xytext=(0, 6), ha="center", fontsize=8, color="#007bff")
 
-    ax1.set_title("Estratégia de Desmame de CPO por Quadrante", fontsize=12, pad=15, fontweight='bold')
-    ax1.set_xticks(x_cpo); ax1.set_xticklabels(meses_labels, fontsize=9, rotation=30)
-    ax1.set_ylabel("CPO Ofertado (R$)", fontsize=11, fontweight='bold'); ax1.set_ylim(-1.0, 7.5)
-    ax1.grid(axis='y', linestyle='--', alpha=0.3); ax1.legend(loc='lower left', frameon=True, facecolor='white', fontsize=9)
-    ax1.spines['top'].set_visible(False); ax1.spines['right'].set_visible(False)
+    ax1.set_title("Estratégia de Desmame de CPO por Quadrante", fontsize=12, pad=15, fontweight="bold")
+    ax1.set_xticks(x_cpo)
+    ax1.set_xticklabels(meses_labels, fontsize=9, rotation=30)
+    ax1.set_ylabel("CPO Ofertado (R$)", fontsize=11, fontweight="bold")
+    ax1.set_ylim(-1.0, 7.5)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3)
+    ax1.legend(loc="lower left", frameon=True, facecolor="white", fontsize=9)
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
     plt.tight_layout()
-    fig_cpo.savefig(os.path.join(PLOTS_DIR, "cpo_strategy.png"))
+    fig_cpo.savefig(os.path.join(PLOTS_DIR, "otimizacao_cpo_desmame.png"), dpi=300)
     plt.close(fig_cpo)
 
-    logger.info(f"Pipeline Total Concluído em {time.time() - start_time_pipeline:.2f} segundos.")
+    # Gráfico 5: Otimização de CPO - Base Ativa e Churn
+    fig_base, ax2 = plt.subplots(figsize=(10.5, 5))
+    ax2.plot(x_cpo, df_simulacao_pd["total_ativos"] / 1e3, marker="o", linewidth=3, color="#17a2b8", label="Usuários Ativos (k)")
+    for i, txt in enumerate(df_simulacao_pd["total_ativos"]):
+        ax2.annotate(f"{txt/1e3:.0f}k", (x_cpo[i], txt / 1e3), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9)
+
+    ax2.set_title("Base Ativa em Crescimento Estável e Taxa de Churn", fontsize=12, pad=15, fontweight="bold")
+    ax2.set_xticks(x_cpo)
+    ax2.set_xticklabels(meses_labels, fontsize=9, rotation=30)
+    ax2.set_ylabel("Usuários Ativos (Milhares)", fontsize=11, fontweight="bold")
+    ax2.set_ylim(min(df_simulacao_pd["total_ativos"] / 1e3) * 0.95, max(df_simulacao_pd["total_ativos"] / 1e3) * 1.10)
+    ax2.grid(axis="y", linestyle="--", alpha=0.3)
+
+    ax2_twin = ax2.twinx()
+    ax2_twin.plot(x_cpo, df_simulacao_pd["taxa_churn_total_pct"], color="#dc3545", linestyle="--", linewidth=2.5, marker="s", label="Taxa de Churn (%)")
+    for i, churn in enumerate(df_simulacao_pd["taxa_churn_total_pct"]):
+        ax2_twin.annotate(f"{churn:.1f}%", (x_cpo[i], churn), textcoords="offset points", xytext=(0, -14), ha="center", fontsize=9, color="#dc3545")
+
+    ax2_twin.set_ylabel("Churn Consolidado (%)", fontsize=11, color="#dc3545", fontweight="bold")
+    ax2_twin.set_ylim(5.0, 25.0)
+    ax2_twin.spines["top"].set_visible(False)
+
+    lines_1, labels_1 = ax2.get_legend_handles_labels()
+    lines_2, labels_2 = ax2_twin.get_legend_handles_labels()
+    ax2.legend(lines_1 + lines_2, labels_1 + labels_2, loc="lower left", frameon=True, facecolor="white", fontsize=9)
+    ax2.spines["top"].set_visible(False)
+    plt.tight_layout()
+    fig_base.savefig(os.path.join(PLOTS_DIR, "otimizacao_base_churn.png"), dpi=300)
+    plt.close(fig_base)
+
+    # Gráfico 6: Otimização de CPO - Lucro Líquido
+    fig_lucro, ax3 = plt.subplots(figsize=(10.5, 5))
+    lucro_milhoes = df_simulacao_pd["lucro_total_liquido"] / 1e6
+
+    ax3.plot(x_cpo, lucro_milhoes, marker="o", linewidth=3, color="#28a745", label="Lucro Líquido Mensal (R$ M)")
+    ax3.fill_between(x_cpo, lucro_milhoes, 0, alpha=0.15, color="#28a745")
+
+    for i, val in enumerate(lucro_milhoes):
+        ax3.annotate(f"R$ {val:.2f}M", (x_cpo[i], val), textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, color="#1e7e34")
+
+    ax3.set_title("Expansão da Margem: Evolução do Lucro Líquido Mensal", fontsize=12, pad=15, fontweight="bold")
+    ax3.set_xticks(x_cpo)
+    ax3.set_xticklabels(meses_labels, fontsize=9, rotation=30)
+    ax3.set_ylabel("Lucro Líquido (R$ Milhões)", fontsize=11, fontweight="bold")
+    ax3.set_ylim(0, max(lucro_milhoes) * 1.20)
+    ax3.grid(axis="y", linestyle="--", alpha=0.3)
+    ax3.legend(loc="lower right", frameon=True, facecolor="white", fontsize=9)
+    ax3.spines["top"].set_visible(False)
+    ax3.spines["right"].set_visible(False)
+    plt.tight_layout()
+    fig_lucro.savefig(os.path.join(PLOTS_DIR, "otimizacao_lucro_liquido.png"), dpi=300)
+    plt.close(fig_lucro)
+
+    total_pipeline_time = time.time() - start_time_pipeline
+    logger.info(f"✅ Pipeline Completo Executado com Sucesso em {total_pipeline_time:.2f} segundos!")
+
 
 if __name__ == "__main__":
     main()
