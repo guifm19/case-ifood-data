@@ -31,6 +31,9 @@ Durante a auditoria de qualidade na camada Silver, identificou-se que pedidos co
 * **Risco Analítico:** A retenção M+1 avalia a coorte de usuários ativos em Dezembro/2018 que voltaram a comprar em Janeiro/2019. Se a deduplicação priorizasse o registro mais recente (Janeiro), o histórico de Dezembro seria esvaziado artificialmente, inviabilizando a coorte base M0. Se criássemos um surrogate key e não desconsiderássemos os pedidos duplicados, seria observada uma retenção de 100% (todos os comprantes de Dezembro teriam pedido em Janeiro).
 * **Resolução Implementada:** Foi utilizada uma Window Function temporal descendente (`rn_desc > 1`) para descartar os duplicados mais recentes. Isso manteve a integridade do volume de M0 e permitiu calcular a taxa de recompra real em Janeiro (M1).
 
+### Marcação de Usuários
+Durante a auditoria de qualidade na camada Silver, foram identificados 310 usuários sem marcação de 'target' ou 'controle' (estes customer_id não constavam na tabela de marcação de ab_test_group). Para fins de consistência, estes usuários foram assumidos como usuários 'controle', ou seja, usuários que não tiveram acesso ao cupom do teste A/B.
+
 ### Resiliência e Data Quality
 * **Ingestão com Retry:** Mecanismo de reexecução exponencial para mitigar falhas de rede no download das fontes S3 (camada Raw).
 * **Tabela de Observabilidade:** Gravação automática de métricas de qualidade na tabela `dq_ingestion_observability` a cada batch executado (monitoramento de IDs nulos, duplicatas e valores negativos).
