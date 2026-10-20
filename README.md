@@ -1,27 +1,42 @@
 # Case Técnico de Data Analysis - iFood
 
-Pipeline de dados ponta a ponta e modelagem analítica desenvolvidos no ecossistema Databricks, cobrindo da ingestão bruta (Medallion Architecture) aos testes de hipótese estatísticos, viabilidade financeira de cupons e segmentação RFV.
+Pipeline de dados ponta a ponta e modelagem analítica estratégica, cobrindo desde a ingestão bruta e tratamento na arquitetura Medalhão (Bronze, Silver e Gold) até testes de hipótese estatísticos (Z-Test), viabilidade financeira de cupons e segmentação RFV.
+
+O projeto foi estruturado para ser **agnóstico de plataforma**: pode ser executado interativamente no Databricks ou de forma autônoma como um script Python/PySpark (`main.py`) via terminal, esteiras de CI/CD, contêineres Docker ou orquestradores (ex: Apache Airflow).
 
 ---
 
 ## 1. Instruções de Execução
 
-Para reproduzir integralmente este projeto de forma independente:
+Escolha o ambiente de sua preferência para reproduzir integralmente os resultados:
 
-1. **Importação do Notebook:**
-   * Acesse o seu workspace no Databricks.
-   * Navegue até **Workspace** > **Users** > seu usuário.
-   * Clique com o botão direito, selecione **Import** e faça o upload do arquivo `Case iFood (prod) - Guilherme F.ipynb`.
-
-2. **Ambiente de Computação Recomendado:**
-   * **Databricks Serverless** ou cluster Single Node / Multi Node com **Databricks Runtime 13.3+ LTS** (Spark 3.4+).
-   * **Unity Catalog:** Certifique-se de que o catálogo `main` e o esquema `default` estejam disponíveis para criação do volume de dados brutos (`/Volumes/main/default/ifood_raw_data`). Caso execute sem Unity Catalog, o código possui fallback automático para `/tmp/ifood_raw_data`.
-
+### Opção A: Databricks (Notebook Interativo)
+1. **Importação:**
+   * Acesse o workspace do Databricks.
+   * Navegue até **Workspace** > **Users** > `seu_usuario`.
+   * Clique com o botão direito, selecione **Import** e faça o upload do notebook `Case iFood (prod) - Guilherme F.ipynb`.
+2. **Cluster / Runtime:**
+   * Databricks Runtime 13.3+ LTS (Apache Spark 3.4+).
+   * Catálogo `main` e schema `default` disponíveis (o pipeline possui fallback automático para `/tmp/ifood_raw_data` caso não utilize Unity Catalog).
 3. **Execução:**
-   * Abra o notebook importado.
-   * Clique em **Run All** (Executar Tudo).
-   * O pipeline executa desde a limpeza de tabelas prévias, download e extração dos dados brutos, criação das camadas Delta (Bronze, Silver, Gold), até a renderização dos testes estatísticos, painéis visuais e análises de negócio relevantes para o case.
+   * Clique em **Run All**. O notebook executará a ingestão, os Data Marts Delta Lake, as tabelas formatadas e os gráficos executivos.
 
+---
+
+### Opção B: Script Python Standalone (`main.py`)
+Indicado para execução local ou submissão via `spark-submit`:
+
+1. **Pré-requisitos:**
+   * Python 3.9+ instalado.
+   * Java JRE/JDK 8, 11 ou 17 configurado no sistema (`java -version`).
+2. **Configuração do Ambiente:**
+   ```bash
+   # Crie e ative um ambiente virtual
+   python -m venv venv
+   source venv/bin/activate  # No Windows: .\venv\Scripts\activate
+
+   # Instale as dependências
+   pip install -r requirements.txt
 ---
 
 ## 2. Decisões Técnicas e Integridade de Dados
